@@ -122,25 +122,22 @@ function dump_model(bst::Booster, fname::String; fmap::String="", with_stats::Bo
     close(fo)
 end
 
-function makeDMatrix(data, label)
-    # running converts
-    if typeof(data) != DMatrix
-        if typeof(data) == String
-            if label != Union{}
-                warning("label will be ignored when data is a file")
-            end
-            return DMatrix(data)
-        else
-            if label == Union{}
-                error("label argument must be present for training, unless you pass in a DMatrix")
-            end
-            return DMatrix(data, label = label)
-        end
-    else
-        return data
-    end
-end
+makeDMatrix(data::DMatrix, label) = data
+function makeDMatrix(data::String, label)
+  if label != Union{}
+    warning("label will be ignored when data is a file")
+  end
 
+  return DMatrix(data)
+end
+function makeDMatrix(data::AbstractArray, label)
+  if label == Union{}
+    error("label argument must be present for training, unless you pass in a DMatrix")
+  end
+
+  return DMatrix(data, label = label)
+end
+  
 ### train ###
 function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist = [], metrics = [],
                  obj = Union{}, feval = Union{}, group = [], kwargs...)
@@ -172,7 +169,7 @@ function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist 
         XGBoosterSetParam(bst.handle, "eval_metric", string(itm))
     end
     for i = 1:nrounds
-        update(bst, 1, dtrain, obj=obj)
+        update(bst, dtrain, 1, obj)
         if !silent
             @printf(STDERR, "%s", eval_set(bst, watchlist, i, feval = feval))
         end
@@ -181,46 +178,54 @@ function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist 
 end
 
 ### update ###
-function update(bst::Booster, nrounds::Integer, dtrain::DMatrix; obj = Union{})
-    if typeof(obj) == Function
-        pred = predict(bst, dtrain)
-        grad, hess = obj(pred, dtrain)
-        @assert size(grad) == size(hess)
-        XGBoosterBoostOneIter(bst.handle, dtrain.handle,
-                              convert(Vector{Float32}, grad),
-                              convert(Vector{Float32}, hess),
-                              convert(UInt64, size(hess)[1]))
-    else
-        XGBoosterUpdateOneIter(bst.handle, convert(Int32, nrounds), dtrain.handle)
-    end
+function update(bst::Booster, dtrain::DMatrix, iter::Integer, obj::Function)
+  pred = predict(bst, dtrain)
+  grad, hess = obj(pred, dtrain)
+  @assert size(grad) == size(hess)
+  XGBoosterBoostOneIter(bst.handle, dtrain.handle,
+                        convert(Vector{Float32}, grad),
+                        convert(Vector{Float32}, hess),
+                        convert(UInt64, size(hess)[1]))
+end
+
+function update(bst::Booster, dtrain::DMatrix, iter::Integer, obj::Any)
+  XGBoosterUpdateOneIter(bst.handle, convert(Int32, iter), dtrain.handle)
 end
 
 
 ### eval_set ###
 function eval_set(bst::Booster, watchlist::Vector{Tuple{DMatrix,String}}, iter::Integer;
                   feval = Union{})
-    dmats = DMatrix[]
-    evnames = String[]
-    for itm in watchlist
-        push!(dmats, itm[1])
-        push!(evnames, itm[2])
+  dmats = DMatrix[]
+  evnames = String[]
+  for itm in watchlist
+    push!(dmats, itm[1])
+    push!(evnames, itm[2])
+  end
+  res = []
+  if typeof(feval) == Function
+    #= res *= @sprintf("[%d]", iter) =#
+    #@printf(STDERR, "[%d]", iter)
+    for j in 1:size(dmats)[1]
+      pred = predict(bst, dmats[j])  # predict using all trees
+      name, val = feval(pred, dmats[j])
+      push!(res, (@sprintf("%s-%s", evnames[j], name), val))
+      #= res *= @sprintf("\t%s-%s:%f", evnames[j], name, val) =#
     end
-    res = ""
-    if typeof(feval) == Function
-        res *= @sprintf("[%d]", iter)
-        #@printf(STDERR, "[%d]", iter)
-        for j in 1:size(dmats)[1]
-            pred = predict(bst, dmats[j])
-            name, val = feval(pred, dmats[j])
-            res *= @sprintf("\t%s-%s:%f", evnames[j], name, val)
-        end
-        res *= @sprintf("\n")
-    else
-        res *= @sprintf("%s\n", XGBoosterEvalOneIter(bst.handle, convert(Int32, iter),
-                                                     [mt.handle for mt in dmats],
-                                                     evnames, convert(UInt64, size(dmats)[1])))
+    #= res *= @sprintf("\n") =#
+  else
+    #= res *= @sprintf("%s\n", XGBoosterEvalOneIter(bst.handle, convert(Int32, iter), =#
+    #=                                              [mt.handle for mt in dmats], =#
+    #=                                              evnames, convert(UInt64, size(dmats)[1]))) =#
+    msg = XGBoosterEvalOneIter(bst.handle, convert(Int32, iter),
+                                                 [mt.handle for mt in dmats],
+                                                 evnames, convert(UInt64, size(dmats)[1]))
+    for nv in split(msg, "\t")[2:end]
+      msg_part = split(nv, ":")
+      push!(res, (msg_part[1], parse(Float64, msg_part[2])))
     end
-    return res
+  end
+  return res
 end
 
 ### predict ###
@@ -238,27 +243,28 @@ end
 type CVPack
     dtrain::DMatrix
     dtest::DMatrix
-    watchlist::Vector{Tuple{DMatrix,String}}
+    watchlist::Vector{Tuple{DMatrix, String}}
     bst::Booster
-    function CVPack(dtrain::DMatrix, dtest::DMatrix, param)
+    function CVPack(dtrain::DMatrix, dtest::DMatrix, params)
         bst = Booster(cachelist = [dtrain, dtest])
-        for itm in param
+        for itm in params
             XGBoosterSetParam(bst.handle, string(itm[1]), string(itm[2]))
         end
-        watchlist = [(dtrain,"train"), (dtest, "test")]
+        watchlist = [(dtrain, "train"), (dtest, "test")]
         new(dtrain, dtest, watchlist, bst)
     end
 end
 
-function mknfold(dall::DMatrix, nfold::Integer, param, seed::Integer, evals=[]; fpreproc = Union{},
+# TODO Change this to call to MLStats or something like that
+function mknfold(dall::DMatrix, nfold::Integer, params, seed::Integer, evals=[], stratified=true; fpreproc = Union{},
                  kwargs = [])
     srand(seed)
     randidx = randperm(XGDMatrixNumRow(dall.handle))
-    kstep = size(randidx)[1] / nfold
-    idset = [randidx[round(Int64, (i-1) * kstep) + 1 : min(size(randidx)[1],round(Int64, i * kstep))] for i in 1:nfold]
-    ret = CVPack[]
+    kstep = div(size(randidx)[1], nfold)
+    idset = [randidx[(i-1) * kstep + 1 : min(size(randidx)[1], i * kstep)] for i in 1:nfold]
+    ret = Vector{CVPack}()
     for k in 1:nfold
-        selected = Int[]
+        selected = Vector{Int}()
         for i in 1:nfold
             if k != i
                 selected = vcat(selected, idset[i])
@@ -266,14 +272,13 @@ function mknfold(dall::DMatrix, nfold::Integer, param, seed::Integer, evals=[]; 
         end
         dtrain = slice(dall, selected)
         dtest = slice(dall, idset[k])
+        # TODO: rewrite this part with type dispatch
         if typeof(fpreproc) == Function
-            dtrain, dtest, tparam = fpreproc(dtrain, dtest, deepcopy(param))
+            dtrain, dtest, tparam = fpreproc(dtrain, dtest, deepcopy(params))
         else
             tparam = param
         end
-        plst = vcat([itm for itm in param], [("eval_metric", itm) for itm in evals])
-        plst = vcat(plst, [(string(itm[1]), string(itm[2])) for itm in kwargs])
-        push!(ret, CVPack(dtrain, dtest, plst))
+        push!(ret, CVPack(dtrain, dtest, tparam))
     end
     return ret
 end
@@ -306,17 +311,21 @@ function aggcv(rlist; show_stdv = true)
     return ret
 end
 
-function nfold_cv(data, num_boost_round::Integer = 10, nfold::Integer = 3; label = Union{},
-                  param=[], metrics=[], obj = Union{}, feval = Union{}, fpreproc = Union{},
+function nfold_cv(data, nrounds::Integer = 10, nfold::Integer = 3; label = Union{},
+                  params=[], metrics=[], stratified = true, obj = Union{}, feval = Union{}, fpreproc = Union{},
                   show_stdv = true, seed::Integer = 0, kwargs...)
     dtrain = makeDMatrix(data, label)
     results = String[]
-    cvfolds = mknfold(dtrain, nfold, param, seed, metrics, fpreproc=fpreproc, kwargs = kwargs)
-    for i in 1:num_boost_round
+    params = vcat([itm for itm in params], [("eval_metric", itm) for itm in metrics])
+    params = vcat(params, [(string(itm[1]), string(itm[2])) for itm in kwargs])
+    
+    # TODO folds predefined
+    cvfolds = mknfold(dtrain, nfold, params, seed, stratified, fpreproc=fpreproc)
+    for i in 1:nrounds
         for f in cvfolds
-            update(f.bst, 1, f.dtrain, obj = obj)
+            update(f.bst, f.dtrain, i - 1, obj)
         end
-        res = aggcv([eval_set(f.bst, f.watchlist, i, feval = feval) for f in cvfolds],
+        res = aggcv([eval_set(f.bst, f.watchlist, i - 1, feval = feval) for f in cvfolds],
                     show_stdv = show_stdv)
         push!(results, res)
         @printf(STDERR, "%s\n", res)
