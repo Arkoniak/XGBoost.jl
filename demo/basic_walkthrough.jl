@@ -2,7 +2,7 @@ using XGBoost
 
 # we load in the agaricus dataset
 # In this example, we are aiming to predict whether a mushroom can be eated
-function readlibsvm(fname::ASCIIString, shape)
+function readlibsvm(fname::String, shape)
     dmx = zeros(Float32, shape)
     label = Float32[]
     fi = open(fname, "r")
@@ -13,7 +13,7 @@ function readlibsvm(fname::ASCIIString, shape)
         line = line[2:end]
         for itm in line
             itm = split(itm, ":")
-            dmx[cnt, int(itm[1]) + 1] = float(int(itm[2]))
+            dmx[cnt, parse(Int, itm[1]) + 1] = float(parse(Int, itm[2]))
         end
         cnt += 1
     end
@@ -68,7 +68,7 @@ save(bst, "xgb.model")
 # load binary model to julia
 bst2 = Booster(model_file = "xgb.model")
 preds2 = predict(bst2, test_X)
-print("sum(abs(pred2-pred))=", sum(abs(preds2 .- preds)), "\n")
+print("sum(abs(pred2-pred))=", sum(abs.(preds2 .- preds)), "\n")
 
 #----------------Advanced features --------------
 # to use advanced features, we need to put data in xgb.DMatrix
