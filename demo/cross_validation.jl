@@ -7,7 +7,7 @@ dtest = DMatrix("../data/agaricus.txt.test")
 
 #Defining parameters for xgboost
 
-param = ["max_depth" => 2,
+params = ["max_depth" => 2,
          "eta" => 1,
          "silent" => 1,
          "objective" => "binary:logistic"]
@@ -18,30 +18,30 @@ print ("running cross validation\n")
 # do cross validation, this will print result out as
 # [iteration]  metric_name:mean_value+std_value
 # std_value is standard deviation of the metric
-nfold_cv(dtrain, num_round, nfold, param = param, metrics = ["error"], seed = 0)
+nfold_cv(dtrain, num_round, nfold, params = params, metrics = ["error"], seed = 0)
 
 print ("running cross validation, disable standard deviation display\n")
 # do cross validation, this will print result out as
 # [iteration]  metric_name:mean_value+std_value
 # std_value is standard deviation of the metric
-nfold_cv(dtrain, num_round, nfold, param = param, metrics = ["error"], seed = 0, show_stdv = false)
+nfold_cv(dtrain, num_round, nfold, params = params, metrics = ["error"], seed = 0, show_stdv = false)
 
 print ("running cross validation, with preprocessing function\n")
 # define the preprocessing function
 # used to return the preprocessed training, test data, and parameter
 # we can use this to do weight rescale, etc.
 # as a example, we try to set scale_pos_weight
-function fpreproc(dtrain::DMatrix, dtest::DMatrix, param)
+function fpreproc(dtrain::DMatrix, dtest::DMatrix, params)
     label = get_info(dtrain, "label")
     ratio = sum(label == 0) / sum(label == 1)
-    param["scale_pos_weight"] = ratio
-    return dtrain, dtest, param
+    params["scale_pos_weight"] = ratio
+    return dtrain, dtest, params
 end
 # do cross validation, for each fold
-# the dtrain, dtest, param will be passed into fpreproc
+# the dtrain, dtest, params will be passed into fpreproc
 # then the return value of fpreproc will be used to generate
 # results of that fold
-nfold_cv(dtrain, num_round, nfold, param = param, metrics = ["auc"],
+nfold_cv(dtrain, num_round, nfold, params = params, metrics = ["auc"],
          seed = 0, show_stdv = false, fpreproc = fpreproc)
 
 print("running cross validation, with customized loss function\n")

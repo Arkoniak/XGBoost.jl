@@ -1,5 +1,5 @@
 using XGBoost
-using FactCheck
+using Base.Test
 
 include("utils.jl")
 
