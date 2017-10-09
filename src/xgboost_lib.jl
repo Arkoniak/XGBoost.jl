@@ -155,8 +155,7 @@ type CVPack
 end
 
 ### train ###
-function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist = [], metrics = [],
-                 obj = Union{}, feval = Union{}, group = [], kwargs...)
+function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist = [], metrics = [], obj = Union{}, feval = Union{}, group = [], kwargs...)
   dtrain = makeDMatrix(data, label)
   if length(group) > 0
     set_info(dtrain, "group", group)
@@ -190,6 +189,63 @@ function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist 
       @printf(STDERR, "%s", eval_set(bst, watchlist, i, feval = feval))
     end
   end
+  return bst
+end
+
+"""
+eXtreme Gradient Boosting Training
+
+*train* is an advanced interface for training an xgboost model. The *xgboost* function is a simple wrapper for *train*
+
+# Arguments
+
+"""
+function train(data, nrounds::Integer; 
+               label = Union{}, params = Dict{String, Any}(), watchlist = [], 
+               metrics = [], obj = Union{}, feval = Union{},
+               callbacks::Vector = AbstractCallback[],
+               early_stopping_rounds = nothing, kwargs...)
+  dtrain = makeDMatrix(data, label)
+
+  cache = vcat([dtrain], [itm[1] for itm in watchlist])
+  bst = Booster(cachelist = cache)
+
+  num_class = max(get(params, "num_class", 1), 1)
+  num_parallel_tree = max(get(params, "num_parallel_tree", 1), 1)
+  niter_init = 0       # can be set from xgb_model (when it is implemented)
+  is_update = get(params, "process_type", ".") == "update"
+  niter_skip = ifelse(is_update, 0, niter_init)
+  begin_iteration = niter_skip + 1
+  end_iteration = niter_skip + nrounds
+
+  params = vcat([("silent", "1")],
+                [(k, string(v)) for (k, v) in params],
+                [("eval_metric", itm) for itm in metrics],
+                [(string(itm[1]), string(itm[2])) for itm in kwargs])
+
+  silent = false
+  for itm in params
+    XGBoosterSetParam(bst.handle, string(itm[1]), string(itm[2]))
+    if itm[1] == :silent
+      silent = itm[2] != 0
+    end
+  end
+  if isempty(watchlist)
+    watchlist = [(dtrain, "train")]
+  end
+
+  bck = Bucket()
+  for i = begin_iteration:end_iteration
+    pre_iter!(callbacks, bck)
+    update(bst, dtrain, i, obj)
+    names, msg = eval_set(bst, watchlist, i, feval = feval)
+    post_iter!(callbacks, bck)
+    if bck.stop_condition
+      break
+    end
+  end
+  finalize!(callbacks, bck)
+
   return bst
 end
 
@@ -287,34 +343,6 @@ function mknfold(dall::DMatrix, nfold::Integer, params, seed::Integer,
       tparams = params
     end
     push!(ret, CVPack(dtrain, dtest, tparams))
-  end
-  return ret
-end
-
-function aggcv(rlist; show_stdv = true)
-  cvmap = Dict()
-  ret = split(rlist[1])[1]
-  for line in rlist
-    arr = split(line)
-    @assert ret == arr[1]
-    for it in arr[2:end]
-      k, v  = split(it, ":")
-      if !haskey(cvmap, k)
-        cvmap[k] = Float64[]
-      end
-      push!(cvmap[k], float(v))
-    end
-  end
-  items = [item for item in cvmap]
-  sort!(items, by = x -> x[1])
-  for item in items
-    k = item[1]
-    v = item[2]
-    if show_stdv == true
-      ret *= @sprintf("\tcv-%s:%f+%f", k, mean(v), std(v))
-    else
-      ret *= @sprintf("\tcv-%s:%f", k, mean(v))
-    end
   end
   return ret
 end
