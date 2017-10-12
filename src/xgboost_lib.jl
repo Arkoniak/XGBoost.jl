@@ -1,5 +1,6 @@
 include("xgboost_wrapper_h.jl")
 include("callbacks.jl")
+include("crossval.jl")
 
 # TODO: Use reference instead of array for length
 
@@ -73,6 +74,8 @@ function get_info(dmat::DMatrix, field::String)
   JLGetFloatInfo(dmat.handle, field)
 end
 
+get_label(dmat::DMatrix) = get_info(dmat, "label")
+
 function set_info{T<:Real}(dmat::DMatrix, field::String, array::Vector{T})
   dmat._set_info(dmat.handle, field, array)
 end
@@ -87,6 +90,8 @@ function slice{T<:Integer}(dmat::DMatrix, idxset::Vector{T})
                                  convert(UInt64, size(idxset)[1]))
   return DMatrix(handle)
 end
+
+nrow(dmat::DMatrix) = XGDMatrixNumRow(dmat.handle)
 
 type Booster
   handle::Ptr{Void}
@@ -142,14 +147,14 @@ end
 type CVPack
   dtrain::DMatrix
   dtest::DMatrix
-  watchlist::Vector{Tuple{DMatrix, String}}
+  watchlist::Vector{Tuple{String, DMatrix}}
   bst::Booster
   function CVPack(dtrain::DMatrix, dtest::DMatrix, params)
     bst = Booster(cachelist = [dtrain, dtest])
     for itm in params
       XGBoosterSetParam(bst.handle, string(itm[1]), string(itm[2]))
     end
-    watchlist = [(dtrain, "train"), (dtest, "test")]
+    watchlist = [("train", dtrain), ("test", dtest)]
     new(dtrain, dtest, watchlist, bst)
   end
 end
@@ -163,7 +168,7 @@ function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist 
 
   cache = [dtrain]
   for itm in watchlist
-    push!(cache, itm[1])
+    push!(cache, itm[2])
   end
   bst = Booster(cachelist = cache)
   XGBoosterSetParam(bst.handle, "silent", "1")
@@ -178,7 +183,7 @@ function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist 
     XGBoosterSetParam(bst.handle, string(itm[1]), string(itm[2]))
   end
   if size(watchlist)[1] == 0
-    watchlist = [(dtrain, "train")]
+    watchlist = [("train", dtrain)]
   end
   for itm in metrics
     XGBoosterSetParam(bst.handle, "eval_metric", string(itm))
@@ -190,6 +195,16 @@ function xgboost(data, nrounds::Integer; label = Union{}, param = [], watchlist 
     end
   end
   return bst
+end
+
+function get(arr::Vector{Pair{String, Any}}, kw::String, def::Any)
+  for i in 1:length(arr)
+    if arr[i][1] == kw
+      return arr[j][2]
+    end
+  end
+
+  return def
 end
 
 """
@@ -207,7 +222,7 @@ function train(data, nrounds::Integer;
                early_stopping_rounds = nothing, kwargs...)
   dtrain = makeDMatrix(data, label)
 
-  cache = vcat([dtrain], [itm[1] for itm in watchlist])
+  cache = vcat([dtrain], DMatrix[itm[2] for itm in watchlist])
   bst = Booster(cachelist = cache)
 
   num_class = max(get(params, "num_class", 1), 1)
@@ -231,14 +246,18 @@ function train(data, nrounds::Integer;
     end
   end
   if isempty(watchlist)
-    watchlist = [(dtrain, "train")]
+    watchlist = [("train", dtrain)]
   end
 
   bck = Bucket()
   for i = begin_iteration:end_iteration
+    bck.iter = i
     pre_iter!(callbacks, bck)
     update(bst, dtrain, i, obj)
     names, msg = eval_set(bst, watchlist, i, feval = feval)
+    bck.names = names
+    bck.cur_mean = Dict([k => mean(v) for (k, v) in msg])
+    bck.cur_error = Dict([k => std(v, corrected = false) for (k, v) in msg])
     post_iter!(callbacks, bck)
     if bck.stop_condition
       break
@@ -264,19 +283,29 @@ function update(bst::Booster, dtrain::DMatrix, iter::Integer, obj::Any)
   XGBoosterUpdateOneIter(bst.handle, convert(Int32, iter), dtrain.handle)
 end
 
-update(cv::CVPack, iter::Integer, obj::Any) = update(cv.bst, cv.dtrain, iter, obj)
+update(cv::CVPack, iter::Integer, obj) = update(cv.bst, cv.dtrain, iter, obj)
 
 ### eval_set ###
-function eval_set(bst::Booster, watchlist::Vector{Tuple{DMatrix,String}}, iter::Integer; feval = Union{})
+function eval_set(bst::Booster, watchlist::Vector{Tuple{String, DMatrix}}, iter::Integer; feval = nothing)
   dmats = DMatrix[]
   evnames = String[]
   for itm in watchlist
-    push!(dmats, itm[1])
-    push!(evnames, itm[2])
+    push!(dmats, itm[2])
+    push!(evnames, itm[1])
   end
   res = Dict()
   names = []
-  if typeof(feval) == Function
+  if feval isa Void
+    msg = XGBoosterEvalOneIter(bst.handle, convert(Int32, iter),
+                               [mt.handle for mt in dmats],
+                               evnames, convert(UInt64, size(dmats)[1]))
+    print(@sprintf("%s\n", msg))
+    for nv in split(msg, "\t")[2:end]
+      msg_part = split(nv, ":")
+      push!(names, msg_part[1])
+      res[msg_part[1]] = [parse(Float64, msg_part[2])]
+    end
+  else
     print(@sprintf("[%d]", iter))
     #@printf(STDERR, "[%d]", iter)
     for j in 1:size(dmats)[1]
@@ -287,20 +316,8 @@ function eval_set(bst::Booster, watchlist::Vector{Tuple{DMatrix,String}}, iter::
       print(@sprintf("\t%s-%s:%f", evnames[j], name, val))
     end
     print(@sprintf("\n"))
-  else
-    #= res *= @sprintf("%s\n", XGBoosterEvalOneIter(bst.handle, convert(Int32, iter), =#
-    #=                                              [mt.handle for mt in dmats], =#
-    #=                                              evnames, convert(UInt64, size(dmats)[1]))) =#
-    msg = XGBoosterEvalOneIter(bst.handle, convert(Int32, iter),
-                               [mt.handle for mt in dmats],
-                               evnames, convert(UInt64, size(dmats)[1]))
-    print(@sprintf("%s\n", msg))
-    for nv in split(msg, "\t")[2:end]
-      msg_part = split(nv, ":")
-      push!(names, msg_part[1])
-      res[msg_part[1]] = [parse(Float64, msg_part[2])]
-    end
   end
+
   return names, res
 end
 
@@ -319,31 +336,32 @@ function predict(bst::Booster, data; output_margin::Bool = false, ntree_limit::I
 end
 
 # TODO Change this to call to MLStats or something like that
-function mknfold(dall::DMatrix, nfold::Integer, params, seed::Integer,
+function mknfold(dall::DMatrix, nfold::Integer, params, seed::Union{Integer, Void},
                  evals=[], stratified=true; 
-                 fpreproc = Union{}, kwargs = [])
-  srand(seed)
-  randidx = randperm(XGDMatrixNumRow(dall.handle))
-  kstep = div(size(randidx)[1], nfold)
-  idset = [randidx[(i-1) * kstep + 1 : min(size(randidx)[1], i * kstep)] for i in 1:nfold]
-  ret = Vector{CVPack}()
-  for k in 1:nfold
-    selected = Vector{Int}()
-    for i in 1:nfold
-      if k != i
-        selected = vcat(selected, idset[i])
-      end
-    end
-    dtrain = slice(dall, selected)
-    dtest = slice(dall, idset[k])
-    # TODO: rewrite this part with type dispatch
-    if typeof(fpreproc) == Function
-      dtrain, dtest, tparams = fpreproc(dtrain, dtest, deepcopy(params))
-    else
+                 fpreproc = nothing, kwargs = [])
+  if !isa(seed, Void)
+    srand(seed)
+  end
+
+  if stratified
+    folds = CrossValidation.StratifiedKfold(get_label(dall), nfold)
+  else
+    folds = CrossValidation.Kfold(nrow(dall), nfold)
+  end
+
+  ret = CVPack[]
+  for (test, train) in folds
+    dtrain = slice(dall, train)
+    dtest = slice(dall, test)
+    if fpreproc isa Void
       tparams = params
+    else
+      dtrain, dtest, tparams = fpreproc(dtrain, dtest, deepcopy(params))
     end
+
     push!(ret, CVPack(dtrain, dtest, tparams))
   end
+
   return ret
 end
 
@@ -358,20 +376,19 @@ The cross validation function of xgboost
 """
 function nfold_cv(data, nrounds::Integer = 10, nfold::Integer = 3; 
                   label = Union{}, params=[], metrics=[], 
-                  stratified = true, obj = Union{}, feval = Union{},
-                  fpreproc = Union{}, show_stdv = true, 
-                  seed::Integer = 0, 
+                  stratified = true, obj = Union{}, feval = nothing,
+                  fpreproc = nothing, show_stdv = true, 
+                  seed::Union{Integer, Void} = nothing, 
                   callbacks::Vector = AbstractCallback[],
                   kwargs...)
   dtrain = makeDMatrix(data, label)
-  results = String[]
-  params = vcat([itm for itm in params], [("eval_metric", itm) for itm in metrics])
-  params = vcat(params, [(string(itm[1]), string(itm[2])) for itm in kwargs])
+  params = vcat([itm for itm in params], 
+                [("eval_metric", itm) for itm in metrics],
+                [(string(itm[1]), string(itm[2])) for itm in kwargs])
 
-  # TODO folds predefined
   cvfolds = mknfold(dtrain, nfold, params, seed, stratified, fpreproc=fpreproc)
   bck = Bucket()
-  result = Dict[]
+  result = Dict()
   for i in 1:nrounds
     bck.iter = i
     pre_iter!(callbacks, bck)
@@ -385,13 +402,18 @@ function nfold_cv(data, nrounds::Integer = 10, nfold::Integer = 3;
     bck.cur_mean = Dict([k => mean(v) for (k, v) in msg])
     bck.cur_error = Dict([k => std(v, corrected = false) for (k, v) in msg])
     post_iter!(callbacks, bck)
-    println(bck)
     if bck.stop_condition
       break
     end
   end
   finalize!(callbacks, bck)
-  print(result)
+
+  result["best_iteration"] = bck.best_iteration
+  result["best_score"] = bck.best_score
+  result["best_score_error"] = bck.best_score_error
+  result["end_iteration"] = bck.end_iteration
+
+  return(result)
 end
 
 struct FeatureImportance

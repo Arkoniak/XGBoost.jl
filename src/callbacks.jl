@@ -8,8 +8,13 @@ mutable struct Bucket
   stop_condition::Bool
   end_iteration::Int
 
+  # cross val
+  best_iteration::Int
+  best_score::Float64
+  best_score_error::Float64
+
   function Bucket()
-    new(0, [], Dict(), Dict(), false, 0)
+    new(0, [], Dict(), Dict(), false, 0, 0, 0, 0)
   end
 end
 
@@ -70,6 +75,7 @@ function post_iter!(cb::EarlyStopCallback, bck::Bucket)
     init!(cb, bck)
   end
   i = bck.iter
+  bck.end_iteration = i
   score = bck.cur_mean[cb.metric_name]
 
   if (cb.maximize && score > cb.best_score) || (!cb.maximize && score < cb.best_score)
@@ -80,7 +86,6 @@ function post_iter!(cb::EarlyStopCallback, bck::Bucket)
   else
     if (i - cb.best_iteration >= cb.stopping_rounds)
       bck.stop_condition = true
-      bck.end_iteration = i
     end
   end
 
@@ -88,4 +93,17 @@ function post_iter!(cb::EarlyStopCallback, bck::Bucket)
     println("Best iteration: ", cb.best_iteration)
     println("Best value: ", cb.best_msg)
   end
+end
+
+function finalize!(cb::EarlyStopCallback, bck::Bucket)
+  bck.best_iteration = cb.best_iteration
+  bck.best_score = cb.best_score
+  bck.best_score_error = cb.best_msg[3][cb.metric_name]
+end
+
+####################################
+struct EvaluationPrint <: AbstractCallback
+end
+
+function post_iter!(cb::EvaluationPrint, bck::Bucket)
 end

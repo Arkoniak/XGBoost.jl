@@ -6,21 +6,12 @@ using Base.Test
 # Test implementation
 ##########################################################
 
-function test_stratified_crossval()
+function test_crossval()
   dtrain = DMatrix("../../data/agaricus.txt.train")
   dtest = DMatrix("../../data/agaricus.txt.test")
   watchlist = [(dtest, "eval"), (dtrain, "train")]
 
   bck = nfold_cv(dtrain, 500, 3, eta = 1, max_depth = 2, objective = "binary:logistic", silent = 1,
-                 seed = 12345, callbacks = [EarlyStopCallback(10)])
-end
-
-function test_unstratified_crossval()
-  dtrain = DMatrix("../../data/agaricus.txt.train")
-  dtest = DMatrix("../../data/agaricus.txt.test")
-  watchlist = [(dtest, "eval"), (dtrain, "train")]
-
-  bck = nfold_cv(dtrain, 500, 3, eta = 1, max_depth = 2, objective = "binary:logistic", silent = 1, stratified = false,
                  seed = 12345, callbacks = [EarlyStopCallback(10)])
 end
 
@@ -37,20 +28,25 @@ end
 
 gini_normalized(actual, pred) = gini(actual, pred)/gini(actual, actual)
 
-ginic(preds::Vector{Float32}, dtrain::DMatrix) = gini(get_info(dtrain, "label"), preds)
-ginic(preds::DMatrix, dtrain::DMatrix) = gini(get_info(dtrain, "label"), get_info(preds, "label"))
-ginic_normalized(preds::Vector{Float32}, dtrain::DMatrix) = ("gini-error", ginic(preds, dtrain)/ginic(dtrain, dtrain))
+ginic(preds::Vector{Float32}, dtrain::DMatrix) = gini(get_label(dtrain), preds)
+ginic_normalized(preds::Vector{Float32}, dtrain::DMatrix) = ("gini-error", gini_normalized(get_label(dtrain), preds))
 
 function test_train()
   dtrain = DMatrix("../../data/agaricus.txt.train")
   dtest = DMatrix("../../data/agaricus.txt.test")
-  watchlist = [(dtest, "eval"), (dtrain, "train")]
-  # println(get_info(dtrain, "label"))
+  watchlist = [("eval", dtrain), ("train", dtest)]
 
+  xgb_params = [
+    "booster" => "gbtree",
+    "objective" => "binary:logistic",
+    "eta" => 0.07,
+    "gamma" => 0,
+    "max_depth" => 5,
+    "subsample" => 0.95,
+    "min_child_weight" => 20
+  ]
   bst = train(dtrain, 20,
-              max_depth = 2,
-              eta = 1,
-              objective = "binary:logistic",
+              params = xgb_params,
               silent = 0,
               seed = 12345,
               feval = ginic_normalized)
@@ -60,9 +56,8 @@ end
 # Run tests
 ################################################################################
 @testset "CrossValidation Test" begin
-  test_stratified_crossval()
-  test_unstratified_crossval()
-  # test_train()
+  # test_crossval()
+  test_train()
 end
 
 end
