@@ -102,8 +102,43 @@ function finalize!(cb::EarlyStopCallback, bck::Bucket)
 end
 
 ####################################
-struct EvaluationPrint <: AbstractCallback
+
+"""
+Callback for printing the result of evaluation
+"""
+mutable struct EvaluationPrint <: AbstractCallback
+  period::Int
+  showsd::Bool
+  last_iter::Int
+
+  function EvaluationPrint(; period::Int = 1, showsd::Bool = true)
+    new(period, showsd, 0)
+  end
 end
 
 function post_iter!(cb::EvaluationPrint, bck::Bucket)
+  if (bck.iter % cb.period == 0) || (bck.iter == 1)
+    cb.last_iter = bck.iter
+    msg = @sprintf("[%s] ", bck.iter)
+    for name in bck.names
+      msg *= @sprintf("%s %s ", name, bck.cur_mean[name])
+      if cb.showsd
+        msg *= @sprintf("%s-sd %s ", name, bck.cur_error[name])
+      end
+    end
+    println(msg)
+  end
+end
+
+function finalize!(cb::EvaluationPrint, bck::Bucket)
+  if cb.last_iter != bck.iter
+    msg = @sprintf("[%s] ", bck.iter)
+    for name in bck.names
+      msg *= @sprintf("%s %s ", name, bck.cur_mean[name])
+      if cb.showsd
+        msg *= @sprintf("%s-sd %s ", name, bck.cur_error[name])
+      end
+    end
+    println(msg)
+  end
 end

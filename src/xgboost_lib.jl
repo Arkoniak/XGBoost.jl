@@ -299,23 +299,19 @@ function eval_set(bst::Booster, watchlist::Vector{Tuple{String, DMatrix}}, iter:
     msg = XGBoosterEvalOneIter(bst.handle, convert(Int32, iter),
                                [mt.handle for mt in dmats],
                                evnames, convert(UInt64, size(dmats)[1]))
-    print(@sprintf("%s\n", msg))
     for nv in split(msg, "\t")[2:end]
       msg_part = split(nv, ":")
       push!(names, msg_part[1])
       res[msg_part[1]] = [parse(Float64, msg_part[2])]
     end
   else
-    print(@sprintf("[%d]", iter))
     #@printf(STDERR, "[%d]", iter)
     for j in 1:size(dmats)[1]
       pred = predict(bst, dmats[j])  # predict using all trees
       name, val = feval(pred, dmats[j])
       push!(names, @sprintf("%s-%s", evnames[j], name))
       res[@sprintf("%s-%s", evnames[j], name)] = [val]
-      print(@sprintf("\t%s-%s:%f", evnames[j], name, val))
     end
-    print(@sprintf("\n"))
   end
 
   return names, res
