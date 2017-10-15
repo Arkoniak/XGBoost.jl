@@ -95,14 +95,16 @@ nrow(dmat::DMatrix) = XGDMatrixNumRow(dmat.handle)
 
 type Booster
   handle::Ptr{Void}
+  best_ntree_limit::Int
 
   function Booster(; cachelist::Vector{DMatrix} = convert(Vector{DMatrix}, []),
-                   model_file::String = "")
+                   model_file::String = "",
+                   best_ntree_limit::Int = 1)
     handle = XGBoosterCreate([itm.handle for itm in cachelist], size(cachelist)[1])
     if model_file != ""
       XGBoosterLoadModel(handle, model_file)
     end
-    bst = new(handle)
+    bst = new(handle, best_ntree_limit)
     finalizer(bst, JLFree)
     return bst
   end
@@ -250,6 +252,9 @@ function train(data, nrounds::Integer;
   end
 
   bck = Bucket()
+  bck.num_parallel_tree = num_parallel_tree
+  bck.params = params
+  bck.bst = bst
   for i = begin_iteration:end_iteration
     bck.iter = i
     pre_iter!(callbacks, bck)
@@ -265,6 +270,7 @@ function train(data, nrounds::Integer;
   end
   finalize!(callbacks, bck)
 
+  bst.best_ntree_limit = bck.best_ntree_limit
   return bst
 end
 
@@ -317,7 +323,7 @@ function eval_set(bst::Booster, watchlist::Vector{Tuple{String, DMatrix}}, iter:
   return names, res
 end
 
-eval_set(cv::CVPack, iter::Integer; feval = Union{}) = eval_set(cv.bst, cv.watchlist, iter; feval = feval)
+eval_set(cv::CVPack, iter::Integer; feval = nothing) = eval_set(cv.bst, cv.watchlist, iter; feval = feval)
 
 ### predict ###
 function predict(bst::Booster, data; output_margin::Bool = false, ntree_limit::Integer = 0)
@@ -384,6 +390,7 @@ function nfold_cv(data, nrounds::Integer = 10, nfold::Integer = 3;
 
   cvfolds = mknfold(dtrain, nfold, params, seed, stratified, fpreproc=fpreproc)
   bck = Bucket()
+  bck.params = params
   result = Dict()
   for i in 1:nrounds
     bck.iter = i
