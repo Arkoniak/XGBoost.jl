@@ -95,16 +95,15 @@ nrow(dmat::DMatrix) = XGDMatrixNumRow(dmat.handle)
 
 type Booster
   handle::Ptr{Void}
-  best_ntree_limit::Int
+  bck::Bucket
 
   function Booster(; cachelist::Vector{DMatrix} = convert(Vector{DMatrix}, []),
-                   model_file::String = "",
-                   best_ntree_limit::Int = 1)
+                   model_file::String = "")
     handle = XGBoosterCreate([itm.handle for itm in cachelist], size(cachelist)[1])
     if model_file != ""
       XGBoosterLoadModel(handle, model_file)
     end
-    bst = new(handle, best_ntree_limit)
+    bst = new(handle)
     finalizer(bst, JLFree)
     return bst
   end
@@ -270,7 +269,7 @@ function train(data, nrounds::Integer;
   end
   finalize!(callbacks, bck)
 
-  bst.best_ntree_limit = bck.best_ntree_limit
+  bst.bck = bck
   return bst
 end
 
